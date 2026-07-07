@@ -200,17 +200,20 @@ def parse_pdf_bytes(pdf_bytes):
             page_text = page.extract_text() or ''
             all_text.append(page_text)
 
-            for table in page.extract_tables(table_settings=table_settings):
+            fine_tables = page.extract_tables(table_settings=table_settings)  # ★ 1번만 호출
+            found_any = False
+            for table in fine_tables:
                 for item in _merge_fine_rows_to_items(table):
+                    found_any = True
                     key = (item['barcode'], item['rack'], item['req_qty'], item['sku'])
                     if key in seen:
                         continue
                     seen.add(key)
                     items.append(item)
 
-            # 혹시 이 페이지에서 위 방식으로 표를 하나도 못 찾았으면
-            # 기존 기본 설정으로 한 번 더 시도 (안전망)
-            if not page.extract_tables(table_settings=table_settings):
+            # 혹시 이 페이지에서 위 방식으로 아이템을 하나도 못 찾았으면
+            # 기존 기본 설정으로 한 번 더 시도 (안전망, 흔치 않은 경우에만 실행됨)
+            if not found_any:
                 for table in page.extract_tables():
                     for row in table:
                         if not is_data_row(row) or len(row) < 7:
