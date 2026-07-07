@@ -140,29 +140,95 @@ def parse_metadata(text):
     return meta
 
 
+def _merge_fine_rows_to_items(fine_rows):
+    """
+    vertical='lines' + horizontal='text' 로 추출한 '잘게 쪼개진' 행들을
+    바코드 셀이 나올 때마다 하나의 아이템으로 묶어서 복원한다.
+    (기존 기본 설정은 페이지 맨 아래 마지막 상품 줄을 자주 놓쳤음 — 2026-07-07 발견/수정)
+    """
+    HEADER_MARKERS = {
+        'SKU', 'Product name', 'bar code', 'Invc', "Q'ty",
+        'Request', 'Rack code', "Stock Q'ty", "(pick Q'ty)"
+    }
+    buf = {k: [] for k in ('sku', 'name', 'c2', 'c4', 'c5')}
+    results = []
+
+    def flush():
+        nonlocal buf
+        barcode = next((m.group(1) for c in buf['c2']
+                         if (m := BARCODE_RE.search(c))), None)
+        rack = next((m.group(1) for c in buf['c5']
+                      if (m := RACK_RE.search(c))), None)
+        req_qty = next((int(c.strip().replace(',', '')) for c in buf['c4']
+                         if INTEGER_RE.match(c.strip())), None)
+        sku = clean_sku(''.join(buf['sku']))
+        name = clean_text(' '.join(buf['name']))
+        if barcode and rack and req_qty is not None and sku:
+            results.append({'sku': sku, 'name': name, 'barcode': barcode,
+                             'req_qty': req_qty, 'rack': rack})
+        buf = {k: [] for k in ('sku', 'name', 'c2', 'c4', 'c5')}
+
+    for row in fine_rows:
+        cells = [(c or '').strip() for c in row]
+        if len(cells) < 7:
+            continue
+        if any(c in HEADER_MARKERS for c in cells):
+            continue
+        if not any(cells):
+            continue
+        if cells[0]: buf['sku'].append(cells[0])
+        if cells[1]: buf['name'].append(cells[1])
+        if cells[2]: buf['c2'].append(cells[2])
+        if cells[4]: buf['c4'].append(cells[4])
+        if cells[5]: buf['c5'].append(cells[5])
+        # 바코드 칸이 확정되는 순간 = 그 상품 한 줄이 끝났다는 신호
+        if cells[2] and BARCODE_RE.search(cells[2]):
+            flush()
+    if any(buf.values()):
+        flush()
+    return results
+
+
 def parse_pdf_bytes(pdf_bytes):
     items = []
     all_text = []
+    seen = set()  # (barcode, rack, req_qty) 중복 방지 (fallback과 겹칠 때)
+    table_settings = {"vertical_strategy": "lines", "horizontal_strategy": "text"}
+
     with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
         for page in pdf.pages:
             page_text = page.extract_text() or ''
             all_text.append(page_text)
-            for table in page.extract_tables():
-                for row in table:
-                    if not is_data_row(row):
+
+            for table in page.extract_tables(table_settings=table_settings):
+                for item in _merge_fine_rows_to_items(table):
+                    key = (item['barcode'], item['rack'], item['req_qty'], item['sku'])
+                    if key in seen:
                         continue
-                    if len(row) < 7:
-                        continue
-                    sku = clean_sku(row[0])
-                    name = clean_text(row[1])
-                    barcode = extract_barcode(row[2])
-                    req_qty = parse_int(row[4])   # Request Q'ty (실제 수량)
-                    rack = extract_rack(row[5])
-                    if not barcode or not rack:
-                        continue
-                    items.append({
-                        'sku': sku, 'name': name, 'barcode': barcode,
-                        'req_qty': req_qty, 'rack': rack,
+                    seen.add(key)
+                    items.append(item)
+
+            # 혹시 이 페이지에서 위 방식으로 표를 하나도 못 찾았으면
+            # 기존 기본 설정으로 한 번 더 시도 (안전망)
+            if not page.extract_tables(table_settings=table_settings):
+                for table in page.extract_tables():
+                    for row in table:
+                        if not is_data_row(row) or len(row) < 7:
+                            continue
+                        sku = clean_sku(row[0])
+                        name = clean_text(row[1])
+                        barcode = extract_barcode(row[2])
+                        req_qty = parse_int(row[4])
+                        rack = extract_rack(row[5])
+                        if not barcode or not rack:
+                            continue
+                        key = (barcode, rack, req_qty, sku)
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        items.append({
+                            'sku': sku, 'name': name, 'barcode': barcode,
+                            'req_qty': req_qty, 'rack': rack,
                     })
     meta = parse_metadata('\n'.join(all_text))
     return {'items': items, 'meta': meta}
