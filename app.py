@@ -1,22 +1,5 @@
 """
 SK B2B Fulfillment — PDF 파싱 API 서버 (클라우드 배포용)
-================================================================
-GitHub Pages에 올린 화면이 이 서버로 PDF를 보내면,
-검증된 pdfplumber 로직으로 정확하게 파싱해서 JSON으로 돌려줍니다.
-
-[ 배포 방법 ]
-  Render.com (무료 티어) 기준:
-    1. 이 폴더(server 폴더)를 GitHub 저장소로 push
-    2. Render에서 New > Web Service > 저장소 연결
-    3. Build Command:  pip install -r requirements.txt
-    4. Start Command:  gunicorn app:app
-    5. 배포 완료되면 https://your-app.onrender.com 주소가 나옴
-       → 이 주소를 화면(HTML)의 API_BASE 에 넣으면 끝
-
-[ 로컬 테스트 ]
-    pip install flask flask-cors pdfplumber gunicorn
-    python app.py
-    → http://localhost:5000 에서 동작
 """
 import io
 import re
@@ -26,15 +9,14 @@ from flask_cors import CORS
 import pdfplumber
 
 app = Flask(__name__)
-# GitHub Pages 등 외부 도메인에서 호출 허용
 CORS(app)
 
-# ════════════════════════════════════════════════════════════
-# PDF 파서 (검증된 로직)
-#  - 줄바꿈으로 쪼개진 SKU 복원
-#  - Request Q'ty(row[4]) 사용 — Invc Q'ty 아님
-# ════════════════════════════════════════════════════════════
-BARCODE_RE = re.compile(r'\b(\d{12,14}|X\w{9,10})\b')
+BARCODE_RE = re.compile(r'\b(\d{2,4}[A-Z]{1,3}\d{6,12}|\d{12,14}|X\w{9,10})\b')
+# ↑ 2026-07-09 수정: 순수 12~14자리 숫자 / ASIN(X+영숫자) 외에,
+#   "880SG00002045" 처럼 숫자 사이에 2~3자리 영문(국가/타입 코드)이 낀
+#   샘플·비매품(NOT FOR SALE) 상품용 특수 바코드 포맷도 인식하도록 확장.
+#   이 포맷을 못 읽으면 해당 줄이 flush 안 되고 다음 상품 줄과 통째로
+#   합쳐지는(SKU/수량 뒤섞임) 심각한 버그로 이어짐 — B0709-AM 배치에서 발견.
 RACK_RE = re.compile(r'\b([A-Z]{2,3}-[A-Z]-\d{1,2}(?:-\d{1,2})?)\b')
 INTEGER_RE = re.compile(r'^\d[\d,]*$')
 INVOICE_RE = re.compile(r'\b(I[NM]\d{8}|CG\d{8,9})\b')
@@ -63,7 +45,6 @@ def clean_text(cell):
 
 
 def clean_sku(cell):
-    """SKU 셀 안의 줄바꿈/공백 전부 제거 (긴 SKU가 두 줄로 쪼개진 경우 복원)."""
     if not cell:
         return ''
     return re.sub(r'\s+', '', cell.strip())
@@ -141,11 +122,6 @@ def parse_metadata(text):
 
 
 def _merge_fine_rows_to_items(fine_rows):
-    """
-    vertical='lines' + horizontal='text' 로 추출한 '잘게 쪼개진' 행들을
-    바코드 셀이 나올 때마다 하나의 아이템으로 묶어서 복원한다.
-    (기존 기본 설정은 페이지 맨 아래 마지막 상품 줄을 자주 놓쳤음 — 2026-07-07 발견/수정)
-    """
     HEADER_MARKERS = {
         'SKU', 'Product name', 'bar code', 'Invc', "Q'ty",
         'Request', 'Rack code', "Stock Q'ty", "(pick Q'ty)"
@@ -181,7 +157,6 @@ def _merge_fine_rows_to_items(fine_rows):
         if cells[2]: buf['c2'].append(cells[2])
         if cells[4]: buf['c4'].append(cells[4])
         if cells[5]: buf['c5'].append(cells[5])
-        # 바코드 칸이 확정되는 순간 = 그 상품 한 줄이 끝났다는 신호
         if cells[2] and BARCODE_RE.search(cells[2]):
             flush()
     if any(buf.values()):
@@ -192,7 +167,7 @@ def _merge_fine_rows_to_items(fine_rows):
 def parse_pdf_bytes(pdf_bytes):
     items = []
     all_text = []
-    seen = set()  # (barcode, rack, req_qty) 중복 방지 (fallback과 겹칠 때)
+    seen = set()
     table_settings = {"vertical_strategy": "lines", "horizontal_strategy": "text"}
 
     with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
@@ -200,7 +175,7 @@ def parse_pdf_bytes(pdf_bytes):
             page_text = page.extract_text() or ''
             all_text.append(page_text)
 
-            fine_tables = page.extract_tables(table_settings=table_settings)  # ★ 1번만 호출
+            fine_tables = page.extract_tables(table_settings=table_settings)
             found_any = False
             for table in fine_tables:
                 for item in _merge_fine_rows_to_items(table):
@@ -211,8 +186,6 @@ def parse_pdf_bytes(pdf_bytes):
                     seen.add(key)
                     items.append(item)
 
-            # 혹시 이 페이지에서 위 방식으로 아이템을 하나도 못 찾았으면
-            # 기존 기본 설정으로 한 번 더 시도 (안전망, 흔치 않은 경우에만 실행됨)
             if not found_any:
                 for table in page.extract_tables():
                     for row in table:
@@ -237,9 +210,6 @@ def parse_pdf_bytes(pdf_bytes):
     return {'items': items, 'meta': meta}
 
 
-# ════════════════════════════════════════════════════════════
-# API 엔드포인트
-# ════════════════════════════════════════════════════════════
 @app.route('/')
 def health():
     return jsonify({'status': 'ok', 'service': 'SK Fulfillment PDF Parser', 'version': '1.0'})
