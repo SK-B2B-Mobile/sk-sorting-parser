@@ -127,6 +127,7 @@ def _merge_fine_rows_to_items(fine_rows):
         'Request', 'Rack code', "Stock Q'ty", "(pick Q'ty)"
     }
     buf = {k: [] for k in ('sku', 'name', 'c2', 'c4', 'c5')}
+    barcode_found = [False]  # 진짜 바코드 정규식에 매칭된 시점부터 True
     results = []
 
     def flush():
@@ -143,6 +144,7 @@ def _merge_fine_rows_to_items(fine_rows):
             results.append({'sku': sku, 'name': name, 'barcode': barcode,
                              'req_qty': req_qty, 'rack': rack})
         buf = {k: [] for k in ('sku', 'name', 'c2', 'c4', 'c5')}
+        barcode_found[0] = False
 
     for row in fine_rows:
         cells = [(c or '').strip() for c in row]
@@ -151,14 +153,29 @@ def _merge_fine_rows_to_items(fine_rows):
         if any(c in HEADER_MARKERS for c in cells):
             continue
         if not any(cells):
+            # ★ 2026-07-13 수정: 빈 줄(상품 사이 구분선) — 이미 진짜 바코드까지
+            #   잡힌 상태라면 여기가 진짜 상품 경계. 예전엔 바코드를 찾는 즉시
+            #   flush했는데, 실제 PDF 표는 바코드가 나온 뒤에도 상품명이 한두
+            #   줄 더 이어지는 경우가 있어서(예: "...CAPSULE CREAM" 바코드까지
+            #   나온 다음 줄에 "55g"가 더 있음) 그 마지막 이름 조각이 다음
+            #   상품의 이름 버퍼로 새어 들어가는 버그가 있었음
+            #   ("55g NIACINAMIDE TXA..." 처럼 표시되던 문제).
+            #   → 바코드 발견 즉시 flush하지 않고, 그 다음 빈 줄을 만날 때까지
+            #   이름을 계속 모은 뒤에 flush.
+            if barcode_found[0]:
+                flush()
             continue
+        if cells[0] and barcode_found[0]:
+            # 드물게 구분용 빈 줄 없이 바로 다음 상품 SKU 줄이 이어지는 경우 대비
+            flush()
         if cells[0]: buf['sku'].append(cells[0])
         if cells[1]: buf['name'].append(cells[1])
-        if cells[2]: buf['c2'].append(cells[2])
+        if cells[2]:
+            buf['c2'].append(cells[2])
+            if BARCODE_RE.search(cells[2]):
+                barcode_found[0] = True
         if cells[4]: buf['c4'].append(cells[4])
         if cells[5]: buf['c5'].append(cells[5])
-        if cells[2] and BARCODE_RE.search(cells[2]):
-            flush()
     if any(buf.values()):
         flush()
     return results
