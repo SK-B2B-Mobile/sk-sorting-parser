@@ -165,9 +165,18 @@ def _merge_fine_rows_to_items(fine_rows):
 
 
 def parse_pdf_bytes(pdf_bytes):
+    # ↑ 2026-07-13 수정: 기존엔 (barcode, rack, req_qty, sku) 값이 완전히
+    #   같은 두 줄을 무조건 "중복 추출 오류"로 보고 하나를 버렸음.
+    #   그런데 서로 다른 진짜 주문 두 건이 우연히 "같은 상품+같은 랙+같은
+    #   수량"이 되는 경우(예: 오늘 CG0000018의 US_CTS12-CU, AbibS20-Tpad 등)
+    #   에도 똑같이 걸려서 실제 데이터가 삭제됨 → 총량 22,696 vs 고객사
+    #   22,686 (차이 -10) 불일치의 정확한 원인이었음.
+    #   → 줄 "내용"이 아니라 표(table)의 화면상 위치(bbox)로만 중복을
+    #   판단하도록 변경. pdfplumber가 겹치는 영역을 두 번 인식해서 같은
+    #   표를 두 번 뽑아내는 진짜 추출 오류만 걸러지고, 값이 우연히 같은
+    #   서로 다른 정상 줄은 더 이상 삭제되지 않음.
     items = []
     all_text = []
-    seen = set()
     table_settings = {"vertical_strategy": "lines", "horizontal_strategy": "text"}
 
     with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
@@ -175,19 +184,27 @@ def parse_pdf_bytes(pdf_bytes):
             page_text = page.extract_text() or ''
             all_text.append(page_text)
 
-            fine_tables = page.extract_tables(table_settings=table_settings)
+            seen_bboxes = set()
+            found_tables = page.find_tables(table_settings=table_settings)
             found_any = False
-            for table in fine_tables:
+            for tbl in found_tables:
+                bbox_key = tuple(round(x, 1) for x in tbl.bbox)
+                if bbox_key in seen_bboxes:
+                    continue
+                seen_bboxes.add(bbox_key)
+                table = tbl.extract()
                 for item in _merge_fine_rows_to_items(table):
                     found_any = True
-                    key = (item['barcode'], item['rack'], item['req_qty'], item['sku'])
-                    if key in seen:
-                        continue
-                    seen.add(key)
                     items.append(item)
 
             if not found_any:
-                for table in page.extract_tables():
+                found_tables2 = page.find_tables()
+                for tbl in found_tables2:
+                    bbox_key = tuple(round(x, 1) for x in tbl.bbox)
+                    if bbox_key in seen_bboxes:
+                        continue
+                    seen_bboxes.add(bbox_key)
+                    table = tbl.extract()
                     for row in table:
                         if not is_data_row(row) or len(row) < 7:
                             continue
@@ -198,14 +215,10 @@ def parse_pdf_bytes(pdf_bytes):
                         rack = extract_rack(row[5])
                         if not barcode or not rack:
                             continue
-                        key = (barcode, rack, req_qty, sku)
-                        if key in seen:
-                            continue
-                        seen.add(key)
                         items.append({
                             'sku': sku, 'name': name, 'barcode': barcode,
                             'req_qty': req_qty, 'rack': rack,
-                    })
+                        })
     meta = parse_metadata('\n'.join(all_text))
     return {'items': items, 'meta': meta}
 
