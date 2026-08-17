@@ -47,7 +47,15 @@ def clean_text(cell):
 def clean_sku(cell):
     if not cell:
         return ''
-    return re.sub(r'\s+', '', cell.strip())
+    # ★ 2026-08-17 긴급 수정(실사고 발견) — 같은 SKU가 PDF 안에서 줄바꿈되는지
+    #   여부에 따라 원본 문서 자체의 대소문자가 다르게 나오는 경우가 실제로
+    #   있음(예: 한 줄이면 "MECUSM10-SCr", 두 줄로 쪼개지면 "MECUSM10-SCR").
+    #   이걸 그대로 두면 총량 리스트와 고객사 PDF가 같은 상품을 "다른 SKU"로
+    #   인식해서, 대소문자가 어긋난 고객사만 스캔 배분 대상에서 조용히
+    #   빠져버림(B2B_PickList_CG00000044: Uwajimaya INC 1개·JJ perfection
+    #   10개가 이 문제로 누락됨). 항상 대문자로 통일해서 어떤 PDF에서
+    #   왔든 같은 SKU면 반드시 같은 문자열이 되도록 함.
+    return re.sub(r'\s+', '', cell.strip()).upper()
 
 
 def parse_int(cell):
