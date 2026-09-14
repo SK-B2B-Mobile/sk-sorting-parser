@@ -11,7 +11,19 @@ import pdfplumber
 app = Flask(__name__)
 CORS(app)
 
-BARCODE_RE = re.compile(r'\b(\d{2,4}[A-Z]{1,3}\d{6,12}|\d{12,14}|X\w{9,10})\b')
+# ★ 2026-09-14 버그 수정(현장 발견) — "Teen Recruitment Bag Kit" 같은 사은품/키트
+#   SKU는 진짜 바코드가 없어서 "00000000abc"처럼 8자리 0 + 소문자 3글자로 된
+#   placeholder 코드가 찍혀 있음. 기존 정규식은 숫자 사이에 낀 대문자(A-Z)만
+#   바코드로 인식해서, 이 소문자 placeholder를 "바코드 없음"으로 판단 →
+#   그 상품 줄이 안 끝난 것으로 오판하고 flush를 안 해서, 다음 상품 줄까지
+#   같은 버퍼에 이어붙여 버림(SKU/상품명이 두 상품 것이 섞여서 하나로
+#   합쳐지고, 바코드·수량도 뒤죽박죽되는 심각한 버그로 이어짐 — 현장에서
+#   "Teen Recruitment Bag Kit SPACE KITTEN"(18개)과 "HYALURONIC CERAMIDE
+#   JELLY CREAM 50ml"(20개)이 한 줄로 합쳐지는 사고로 발견됨).
+#   → 6~10자리 숫자 + 소문자 2~4글자로 된 placeholder 바코드 패턴을 추가로
+#   인식하도록 확장. 이제 이런 placeholder도 "바코드 찾음"으로 인정되어
+#   정상적으로 그 자리에서 flush됨.
+BARCODE_RE = re.compile(r'\b(\d{2,4}[A-Z]{1,3}\d{6,12}|\d{6,10}[a-z]{2,4}|\d{12,14}|X\w{9,10})\b')
 # ↑ 2026-07-09 수정: 순수 12~14자리 숫자 / ASIN(X+영숫자) 외에,
 #   "880SG00002045" 처럼 숫자 사이에 2~3자리 영문(국가/타입 코드)이 낀
 #   샘플·비매품(NOT FOR SALE) 상품용 특수 바코드 포맷도 인식하도록 확장.
