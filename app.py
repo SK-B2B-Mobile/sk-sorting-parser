@@ -23,7 +23,15 @@ CORS(app)
 #   → 6~10자리 숫자 + 소문자 2~4글자로 된 placeholder 바코드 패턴을 추가로
 #   인식하도록 확장. 이제 이런 placeholder도 "바코드 찾음"으로 인정되어
 #   정상적으로 그 자리에서 flush됨.
-BARCODE_RE = re.compile(r'\b(\d{2,4}[A-Z]{1,3}\d{6,12}|\d{6,10}[a-z]{2,4}|\d{12,14}|X\w{9,10})\b')
+# ★ 2026-09-22 긴급 수정(현장 발견) — 위 수정으로도 못 잡는 또 다른 placeholder
+#   형태 발견: "TEEN RECRUITMENT BAG KIT_CAKE MY DAY+GLOW EASY_..." (IDCS00-SETTCG)
+#   상품의 바코드가 "63008507"처럼 숫자만 8자리이고 문자가 전혀 없음. 기존
+#   패턴 중 어느 것도 이걸 못 잡아서(진짜 바코드는 12~14자리, 소문자 placeholder는
+#   숫자+소문자 조합이어야 함) 이 줄도 flush 안 되고 다음 상품 줄과 하나로
+#   합쳐지는 동일한 사고로 이어짐(현장: 40페이지 IDCS00-SETTCG 인식 불가).
+#   → "5~11자리 순수 숫자"로 된 placeholder 바코드 패턴을 추가로 인식.
+#   (진짜 바코드는 12자리 이상이라 길이로 안전하게 구분됨.)
+BARCODE_RE = re.compile(r'\b(\d{2,4}[A-Z]{1,3}\d{6,12}|\d{12,14}|\d{6,10}[a-z]{2,4}|\d{5,11}|X\w{9,10})\b')
 # ↑ 2026-07-09 수정: 순수 12~14자리 숫자 / ASIN(X+영숫자) 외에,
 #   "880SG00002045" 처럼 숫자 사이에 2~3자리 영문(국가/타입 코드)이 낀
 #   샘플·비매품(NOT FOR SALE) 상품용 특수 바코드 포맷도 인식하도록 확장.
@@ -160,6 +168,16 @@ def _merge_fine_rows_to_items(fine_rows):
                          if INTEGER_RE.match(c.strip())), None)
         sku = clean_sku(''.join(buf['sku']))
         name = clean_text(' '.join(buf['name']))
+        # ★ 2026-09-22 긴급 수정 — barcode/rack/req_qty/sku 중 하나라도 못 찾은
+        #   경우 예전엔 이 조건에서 그냥 통째로 버려졌는데, 그 자체는 안전한
+        #   동작임(옆 상품과 안 섞이고 이 상품 한 줄만 결과에서 빠짐). 문제는
+        #   "버려지는 것"이 아니라 "flush가 아예 호출되지 않아서 다음 상품과
+        #   섞이는 것"이었으므로, 아래 for 루프 쪽에서 flush를 더 적극적으로
+        #   호출하도록 수정함(barcode_found 여부와 무관하게 새 SKU/빈 줄에서
+        #   항상 flush). 이 함수 자체는 그대로 두되, 못 찾은 상품은 조용히
+        #   빠지므로 배치 업로드 후 "고객사 없이 로드된 SKU" 경고(batch.html)나
+        #   총량-고객사 합계 불일치 경고로 반드시 눈에 띄게 됨 — 매니저가
+        #   그 경고를 보면 이 PDF의 해당 줄만 수동으로 확인하면 됨.
         if barcode and rack and req_qty is not None and sku:
             results.append({'sku': sku, 'name': name, 'barcode': barcode,
                              'req_qty': req_qty, 'rack': rack})
@@ -182,11 +200,22 @@ def _merge_fine_rows_to_items(fine_rows):
             #   ("55g NIACINAMIDE TXA..." 처럼 표시되던 문제).
             #   → 바코드 발견 즉시 flush하지 않고, 그 다음 빈 줄을 만날 때까지
             #   이름을 계속 모은 뒤에 flush.
-            if barcode_found[0]:
+            # ★ 2026-09-22 긴급 수정(재발 방지) — 예전엔 barcode_found[0]가
+            #   True일 때만 flush했는데, 그러면 바코드 정규식이 아직 못 잡는
+            #   "낯선 placeholder 형식"이 또 나올 때마다 이 상품이 다음 상품과
+            #   계속 섞이는 사고가 반복됨(TKBSM05 case, IDCS00-SETTCG 등 이미
+            #   두 번 발생). 버퍼에 뭐라도 쌓여 있으면(=상품 줄이 하나라도
+            #   시작됐으면) 바코드 인식 여부와 무관하게 여기서 항상 끊는다.
+            #   못 찾은 상품은 flush() 안에서 조용히 결과 목록에서만 빠지고,
+            #   절대 옆 상품과 섞이지 않는다(최악의 경우에도 피해가 그 한
+            #   줄로 한정됨).
+            if any(buf.values()):
                 flush()
             continue
-        if cells[0] and barcode_found[0]:
-            # 드물게 구분용 빈 줄 없이 바로 다음 상품 SKU 줄이 이어지는 경우 대비
+        if cells[0] and buf['sku']:
+            # ★ 2026-09-22 긴급 수정(재발 방지) — 위와 같은 이유로, "빈 줄 없이
+            #   바로 다음 상품 SKU 줄이 이어지는 경우"도 barcode_found 여부와
+            #   무관하게(이미 이전 상품의 SKU 조각이 buf에 있으면) 항상 flush.
             flush()
         if cells[0]: buf['sku'].append(cells[0])
         if cells[1]: buf['name'].append(cells[1])
