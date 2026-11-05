@@ -168,6 +168,30 @@ def _merge_fine_rows_to_items(fine_rows):
     barcode_found = [False]  # 진짜 바코드 정규식에 매칭된 시점부터 True
     results = []
 
+    # ★ 2026-11-05 신규(CMS 이전 대응) — 새 CMS(wms.siliconii.com)의 피킹 리스트 PDF는 표 열 위치가 바뀜:
+    #   예전: SKU(0) · 상품명(1) · bar code(2) · Invc(3) · Request(4) · Rack(5) · Stock(6)
+    #   새것: SKU(0) · 상품명(1) · UPC(2) · (빈 열 3~5) · Invc(6) · Request(7) · Rack code(8) · Stock(9~)
+    #   예전 고정 위치(4·5)로 읽으니 새 PDF에선 수량/랙이 비어서 상품 줄 대부분이 버려졌음
+    #   (11/5 CG00000106: 실제 135줄 19,027개 → 111줄 10,509개만 인식).
+    #   → 표 머리글(SKU / Product name / UPC·bar code / Request / Rack code)에서 열 위치를 찾아 씀.
+    #   머리글을 못 찾으면 예전 위치 그대로(예전 PDF는 동작 변화 없음). flush 타이밍 로직은 그대로.
+    col = {'sku': 0, 'name': 1, 'bc': 2, 'req': 4, 'rack': 5}
+    found = {}
+    for row in fine_rows[:8]:
+        for i, c in enumerate(row or []):
+            t = (c or '').strip()
+            if t == 'SKU' and 'sku' not in found: found['sku'] = i
+            elif t == 'Product name' and 'name' not in found: found['name'] = i
+            elif (t in ('UPC', 'bar code') or (t.startswith('UP') and len(t) <= 3)) and 'bc' not in found: found['bc'] = i  # 머리글도 'UP' + 'C' 로 쪼개질 때가 있음
+            elif t == 'Request' and 'req' not in found: found['req'] = i
+            elif t == 'Rack code' and 'rack' not in found: found['rack'] = i
+    new_layout = len(found) == 5
+    if new_layout:
+        col = found
+    # 새 PDF는 세로 구분선이 없어 긴 바코드가 옆 열로 넘쳐 쪼개짐(예: '88094472' + '56221', 'X004D05' + 'WCF').
+    # 새 형식에서만, 바코드 칸이 완전한 바코드가 아니면 바로 오른쪽(수량 열 전까지) 조각을 이어 붙임.
+    FULL_BC = re.compile(r'^(\d{12,14}|X\w{9,10}|\d{2,4}[A-Z]{1,3}\d{6,12})$')
+
     def flush():
         nonlocal buf
         barcode = next((m.group(1) for c in buf['c2']
@@ -184,9 +208,10 @@ def _merge_fine_rows_to_items(fine_rows):
         buf = {k: [] for k in ('sku', 'name', 'c2', 'c4', 'c5')}
         barcode_found[0] = False
 
+    need = max(7, max(col.values()) + 1)
     for row in fine_rows:
         cells = [(c or '').strip() for c in row]
-        if len(cells) < 7:
+        if len(cells) < need:
             continue
         if any(c in HEADER_MARKERS for c in cells):
             continue
@@ -211,17 +236,22 @@ def _merge_fine_rows_to_items(fine_rows):
             if barcode_found[0]:
                 flush()
             continue
-        if cells[0] and barcode_found[0]:
+        c_sku, c_name, c_bc, c_req, c_rack = cells[col['sku']], cells[col['name']], cells[col['bc']], cells[col['req']], cells[col['rack']]
+        if new_layout and c_bc and not FULL_BC.match(c_bc):
+            extra = ''.join(cells[col['bc'] + 1:col['req']])
+            if extra and re.fullmatch(r'[0-9A-Za-z]+', extra) and FULL_BC.match(c_bc + extra):
+                c_bc = c_bc + extra
+        if c_sku and barcode_found[0]:
             # 드물게 구분용 빈 줄 없이 바로 다음 상품 SKU 줄이 이어지는 경우 대비
             flush()
-        if cells[0]: buf['sku'].append(cells[0])
-        if cells[1]: buf['name'].append(cells[1])
-        if cells[2]:
-            buf['c2'].append(cells[2])
-            if BARCODE_RE.search(cells[2]):
+        if c_sku: buf['sku'].append(c_sku)
+        if c_name: buf['name'].append(c_name)
+        if c_bc:
+            buf['c2'].append(c_bc)
+            if BARCODE_RE.search(c_bc):
                 barcode_found[0] = True
-        if cells[4]: buf['c4'].append(cells[4])
-        if cells[5]: buf['c5'].append(cells[5])
+        if c_req: buf['c4'].append(c_req)
+        if c_rack: buf['c5'].append(c_rack)
     if any(buf.values()):
         flush()
     return results
