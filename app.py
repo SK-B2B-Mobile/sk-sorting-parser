@@ -137,6 +137,23 @@ def parse_metadata(text):
         r'^(Shipment|Ship Via|Registrant|Req Date|Shipping Date|Double check|'
         r'Customer Pick Up|#\d Picking|Box QTY|BP wholesale|FIRST ORDER|SKU|'
         r'TOTAL|bar code|Q\'ty|Product name|Invc|Request|Stock)', re.I)
+    # ★ 2026-11-06 수정(현장: 6번 슬롯에 고객명 대신 첫 상품명 "EYEPHALT") — 피킹 리스트 3번째 줄은 항상
+    #   "<고객명> Ship Via: <방식>" 형식. 예전 규칙(40자 이하·영문자로 시작)이 "4B cosmetics (Nature collection)
+    #   Ship Via: UPS"(숫자로 시작 + 46자)를 버리고 그다음 줄(상품명)을 고객명으로 썼음.
+    #   → "Ship Via:" 앞에 고객명이 붙은 줄을 먼저 찾아 그 줄 전체를 씀(다른 고객사와 같은 모양). 없으면 예전 규칙 그대로.
+    _lns = [l.strip() for l in text.split('\n') if l.strip()]
+    for i, ln in enumerate(_lns):
+        mv = re.match(r'^(.+?)\s+(Ship\s*Via\s*:.*)$', ln, re.I)
+        if mv and re.search(r'[A-Za-z]', mv.group(1)) and len(ln) <= 120 and not EXCLUDE.search(ln):
+            name, tail = mv.group(1).strip(), mv.group(2).strip()
+            # 고객명이 길면 PDF에서 다음 줄로 넘어감(예: "K-Beauty ATX LLC (The Faceshop" + "Austin)") → 이어 붙임.
+            #   다음 줄이 원래 오는 "#1 Picking"·"BP wholesale" 등(EXCLUDE)이면 붙이지 않음.
+            nx = _lns[i + 1] if i + 1 < len(_lns) else ''
+            if nx and len(nx) <= 40 and not EXCLUDE.search(nx) and not INVOICE_RE.match(nx) \
+                    and re.search(r'[A-Za-z]', nx) and not re.search(r'Ship\s*Via', nx, re.I):
+                name = name + ' ' + nx
+            meta['customer'] = name + ' ' + tail
+            return meta
     for ln in [l.strip() for l in text.split('\n') if l.strip()]:
         if len(ln) > 40 or len(ln) < 3:
             continue
