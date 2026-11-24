@@ -329,6 +329,19 @@ def parse_pdf_bytes(pdf_bytes):
                             'sku': sku, 'name': name, 'barcode': barcode,
                             'req_qty': req_qty, 'rack': rack,
                         })
+            # ★ 2026-11-24 긴급 수정(현장: 63쪽 총량 리스트 CG00000137 업로드가 "Failed to fetch"로 튕김)
+            #   pdfplumber 는 읽은 페이지의 글자·선 정보를 문서를 닫을 때까지 메모리에 계속 쌓아 둠(1쪽당 약 12MB).
+            #   63쪽이면 약 800MB → Render 무료 서버 한도(512MB)를 넘어 서버가 강제 종료 → 화면엔 "Failed to fetch".
+            #   (약 35쪽 이하 PDF는 한도 안이라 그동안은 문제 없었음.)
+            #   → 한 페이지를 다 읽으면 그 페이지의 내부 데이터를 바로 비움. 읽는 결과는 100% 같음(실제 PDF로 확인: 843줄 동일),
+            #   최대 메모리 802MB → 67MB.
+            try:
+                page.close()
+            except Exception:
+                try:
+                    page.flush_cache()
+                except Exception:
+                    pass
     meta = parse_metadata('\n'.join(all_text))
     return {'items': items, 'meta': meta}
 
